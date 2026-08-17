@@ -4079,7 +4079,7 @@ bool8 S9xLoadROMImage (const TCHAR *string)
 		SNES9X_INFO,
 		MB_OK | MB_ICONINFORMATION);
 
-    delete buf;
+	delete [] buf;
 
     TCHAR FileName [_MAX_PATH];
 
