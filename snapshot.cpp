@@ -1773,6 +1773,8 @@ int S9xUnfreezeFromStream (STREAM stream)
 
 			UnfreezeStructFromCopy(ssi, SnapScreenshot, COUNT(SnapScreenshot), local_screenshot, version);
 
+			ssi->Width  = min(ssi->Width,  MAX_SNES_WIDTH);
+			ssi->Height = min(ssi->Height, MAX_SNES_HEIGHT);
 			IPPU.RenderedScreenWidth  = min(ssi->Width,  MAX_SNES_WIDTH);
 			IPPU.RenderedScreenHeight = min(ssi->Height, MAX_SNES_HEIGHT);
 			const bool8 scaleDownX = IPPU.RenderedScreenWidth  < ssi->Width;
