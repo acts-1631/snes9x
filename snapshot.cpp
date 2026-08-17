@@ -2199,13 +2199,17 @@ static int UnfreezeBlock (STREAM stream, const char *name, uint8 *block, int siz
 
 	if (rem)
 	{
-		char	*junk = new char[rem];
-		len = READ_STREAM(junk, rem, stream);
-		delete [] junk;
-		if (len != rem)
+		char junk[4096];
+		while (rem > 0)
 		{
-			REVERT_STREAM(stream, rewind, 0);
-			return (WRONG_FORMAT);
+			int chunk = rem < (int) sizeof(junk) ? rem : (int) sizeof(junk);
+			if (READ_STREAM(junk, chunk, stream) != (unsigned int) chunk)
+			{
+				REVERT_STREAM(stream, rewind, 0);
+				return (WRONG_FORMAT);
+			}
+
+			rem -= chunk;
 		}
 	}
 
