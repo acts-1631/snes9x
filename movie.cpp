@@ -102,6 +102,17 @@ static void		write_movie_header (FILE *, SMovie *);
 static void		write_movie_extrarominfo (FILE *, SMovie *);
 static void		change_state (MovieState);
 
+static bool movie_input_size (uint64 sample_count, uint32 bytes_per_sample, uint32 *size)
+{
+	uint64 bytes = sample_count * bytes_per_sample;
+
+	if (bytes > ~(uint32) 0)
+		return false;
+
+	*size = (uint32) bytes;
+	return true;
+}
+
 // HACK: reduce movie size by not storing changes that can only affect polled input in the movie for these types,
 //       because currently no port sets these types to polling
 #define SKIPPED_POLLING_PORT_TYPE(x)	(((x) == CTL_NONE) || ((x) == CTL_JOYPAD) || ((x) == CTL_MP5))
@@ -227,9 +238,13 @@ static void reserve_buffer_space (uint32 space_needed)
 	if (space_needed > Movie.InputBufferSize)
 	{
 		uint32 ptr_offset   = Movie.InputBufferPtr - Movie.InputBuffer;
-		uint32 alloc_chunks = space_needed / BUFFER_GROWTH_SIZE;
+		uint64 alloc_chunks = ((uint64) space_needed + BUFFER_GROWTH_SIZE - 1) / BUFFER_GROWTH_SIZE;
+		uint64 alloc_size = alloc_chunks * BUFFER_GROWTH_SIZE;
 
-		Movie.InputBufferSize = BUFFER_GROWTH_SIZE * (alloc_chunks + 1);
+		if (alloc_size > ~(uint32) 0)
+			alloc_size = space_needed;
+
+		Movie.InputBufferSize = (uint32) alloc_size;
 		Movie.InputBuffer     = (uint8 *) realloc(Movie.InputBuffer, Movie.InputBufferSize);
 		Movie.InputBufferPtr  = Movie.InputBuffer + ptr_offset;
 	}
@@ -509,10 +524,18 @@ void S9xMovieFreeze (uint8 **buf, uint32 *size)
 		return;
 
 	uint32	size_needed;
+	uint32	input_size;
 	uint8	*ptr;
 
-	size_needed = sizeof(Movie.MovieId) + sizeof(Movie.CurrentFrame) + sizeof(Movie.MaxFrame) + sizeof(Movie.CurrentSample) + sizeof(Movie.MaxSample);
-	size_needed += (uint32) (Movie.BytesPerSample * (Movie.MaxSample + 1));
+	if (!movie_input_size((uint64) Movie.MaxSample + 1, Movie.BytesPerSample, &input_size) ||
+		(uint64) input_size + 5 * sizeof(uint32) > ~(uint32) 0)
+	{
+		*buf = NULL;
+		*size = 0;
+		return;
+	}
+
+	size_needed = 5 * sizeof(uint32) + input_size;
 	*size = size_needed;
 
 	*buf = new uint8[size_needed];
@@ -526,7 +549,7 @@ void S9xMovieFreeze (uint8 **buf, uint32 *size)
 	Write32(Movie.CurrentSample, ptr);
 	Write32(Movie.MaxSample, ptr);
 
-	memcpy(ptr, Movie.InputBuffer, Movie.BytesPerSample * (Movie.MaxSample + 1));
+	memcpy(ptr, Movie.InputBuffer, input_size);
 }
 
 int S9xMovieUnfreeze (uint8 *buf, uint32 size)
@@ -544,9 +567,15 @@ int S9xMovieUnfreeze (uint8 *buf, uint32 size)
 	uint32	max_frame      = Read32(ptr);
 	uint32	current_sample = Read32(ptr);
 	uint32	max_sample     = Read32(ptr);
-	uint32	space_needed   = (Movie.BytesPerSample * (max_sample + 1));
+	uint32	space_needed;
+	uint32	space_processed;
+	uint32	current_sample_offset;
 
-	if (current_frame > max_frame || current_sample > max_sample || space_needed > size)
+	if (!movie_input_size((uint64) max_sample + 1, Movie.BytesPerSample, &space_needed) ||
+		!movie_input_size((uint64) current_sample + 1, Movie.BytesPerSample, &space_processed) ||
+		!movie_input_size(current_sample, Movie.BytesPerSample, &current_sample_offset) ||
+		current_frame > max_frame || current_sample > max_sample ||
+		size < 5 * sizeof(uint32) || space_needed > size - 5 * sizeof(uint32))
 		return (WRONG_MOVIE_SNAPSHOT);
 
 	if (Settings.WrongMovieStateProtection)
@@ -574,8 +603,7 @@ int S9xMovieUnfreeze (uint8 *buf, uint32 size)
 	}
 	else
 	{
-      uint32   space_processed = (Movie.BytesPerSample * (current_sample + 1));
-      if (current_frame > Movie.MaxFrame || current_sample > Movie.MaxSample || memcmp(Movie.InputBuffer, ptr, space_processed))
+		if (current_frame > Movie.MaxFrame || current_sample > Movie.MaxSample || memcmp(Movie.InputBuffer, ptr, space_processed))
 			return (SNAPSHOT_INCONSISTENT);
 
 		change_state(MOVIE_STATE_PLAY);
@@ -584,7 +612,7 @@ int S9xMovieUnfreeze (uint8 *buf, uint32 size)
 		Movie.CurrentSample = current_sample;
 	}
 
-	Movie.InputBufferPtr = Movie.InputBuffer + (Movie.BytesPerSample * Movie.CurrentSample);
+	Movie.InputBufferPtr = Movie.InputBuffer + current_sample_offset;
 	read_frame_controller_data(true);
 
 	return (SUCCESS);
@@ -596,6 +624,8 @@ int S9xMovieOpen (const char *filename, bool8 read_only)
 	STREAM	stream;
 	int		result;
 	int		fn;
+	uint32	input_size;
+	long	file_size;
 
 	if (!(fd = fopen(filename, "rb+")))
 	{
@@ -655,18 +685,22 @@ int S9xMovieOpen (const char *filename, bool8 read_only)
 			read_only = TRUE;
 	}
 
-	if (fseek(fd, Movie.ControllerDataOffset, SEEK_SET))
+	Movie.BytesPerSample = bytes_per_sample();
+	if (!movie_input_size((uint64) Movie.MaxSample + 1, Movie.BytesPerSample, &input_size) ||
+		fseek(fd, 0, SEEK_END) || (file_size = ftell(fd)) < 0 ||
+		(uint64) Movie.ControllerDataOffset > (uint64) file_size ||
+		(uint64) input_size > (uint64) file_size - Movie.ControllerDataOffset ||
+		fseek(fd, Movie.ControllerDataOffset, SEEK_SET))
 	{
 		fclose(fd);
 		return (WRONG_FORMAT);
 	}
 
 	Movie.File           = fd;
-	Movie.BytesPerSample = bytes_per_sample();
 	Movie.InputBufferPtr = Movie.InputBuffer;
-	reserve_buffer_space(Movie.BytesPerSample * (Movie.MaxSample + 1));
+	reserve_buffer_space(input_size);
 
-	if (!fread(Movie.InputBufferPtr, 1, Movie.BytesPerSample * (Movie.MaxSample + 1), fd))
+	if (fread(Movie.InputBufferPtr, 1, input_size, fd) != input_size)
 	{
 		printf ("Failed to read from movie file.\n");
 		fclose(fd);
